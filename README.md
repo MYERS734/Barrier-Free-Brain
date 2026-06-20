@@ -30,6 +30,44 @@
 
 ---
 
+## 📌 実装状況
+
+| 機能 | 状態 |
+|---|---|
+| レシート画像のアップロード（JPG / PNG / HEIC） | ✅ 実装済み |
+| OCRによる金額・品目の自動抽出 | ✅ 実装済み |
+| ステップ式の確認・修正UI | ✅ 実装済み |
+| CSV出力 | ✅ 実装済み |
+| freee等の会計API連携 | 🔲 将来構想 |
+| スマホアプリ化 | 🔲 将来構想 |
+
+現在のOCR・分類ロジックは正規表現とキーワードマッチによる簡易版です。レシートのレイアウトによって精度が変わるため、ステップ3で必ず人間が確認・修正できる設計にしています（「修正可能なAI支援フロー」の思想はここに反映されています）。
+
+---
+
+## 🚀 セットアップ方法
+
+```bash
+# 1. リポジトリをクローン
+git clone https://github.com/MYERS734/Barrier-Free-Brain.git
+cd Barrier-Free-Brain
+
+# 2. 必要なパッケージをインストール
+pip install -r requirements.txt
+
+# 3. Tesseract OCR本体をインストール（OS別）
+# Mac:     brew install tesseract tesseract-lang
+# Windows: https://github.com/UB-Mannheim/tesseract/wiki からインストーラーを取得
+# Linux:   sudo apt install tesseract-ocr tesseract-ocr-jpn
+
+# 4. アプリを起動
+streamlit run app.py
+```
+
+ブラウザで `http://localhost:8501` が開き、レシート画像をアップロードして試せます。
+
+---
+
 ## 🛠 技術スタック
 
 * **フロントエンド**
