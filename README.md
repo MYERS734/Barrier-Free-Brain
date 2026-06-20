@@ -1,154 +1,241 @@
-# バリアフリーブレイン（Barrier-Free Brain）
+import streamlit as st
+import json
+import re
+import io
+import csv
+import pytesseract
+from PIL import Image
+from pillow_heif import register_heif_opener
 
-## 🧠 これは何？
+register_heif_opener()
 
-発達障害（ADHD/ASD）の当事者である開発者が、自身の困りごとから設計した**「認知負荷が低く、ミスしにくい」AI支援型の家計簿・会計システムのプロトタイプ**です。
+# --- 1. ページ全体の初期設定（文字を大きく、見やすく） ---
+st.set_page_config(page_title="Barrier-Free Brain", layout="centered")
 
-一般的な家計簿アプリや会計ソフトには、以下のような課題があると感じました。
+st.markdown("""
+    <style>
+    html, body, [class*="css"] { font-size: 18px !important; }
+    .stButton>button { width: 100%; font-size: 20px; height: 3em; }
+    </style>
+""", unsafe_allow_html=True)
 
-* 情報量が多く、判断負荷が高い
-* 操作が複雑で、入力ミスが起きやすい
-* 一度のミス修正コストが高い
+st.title("🧠 バリアフリーブレイン")
+st.caption("特性に寄り添う、焦らせない・ミスしない「自分専用」家計簿システム")
 
-これらを解決するために、「人間の処理能力に合わせる」のではなく、**人間の特性に合わせて設計されたツール**として開発しました。
+# --- 2. 状態（ステート）の管理 ---
+if "step" not in st.session_state:
+    st.session_state.step = "ocr_input"
+if "parsed_data" not in st.session_state:
+    st.session_state.parsed_data = None
+if "history" not in st.session_state:
+    st.session_state.history = []  # CSV出力用に確定済みデータを積み重ねる
 
----
+# カテゴリ候補（家計簿用の分類リスト。優しい言い回し＋補足つき）
+ACCOUNT_OPTIONS = [
+    "食費（毎日のごはん・おやつ）",
+    "日用品費（消耗品・雑貨）",
+    "交通費（電車・バス・ガソリン）",
+    "交際費（プレゼント・友人との外食）",
+    "エンタメ・趣味（本・ゲーム・娯楽）",
+    "その他",
+]
 
-## 🎯 コンセプト
 
-* **1ステップ・1タスク設計**
-  各画面で行う操作を1つに限定し、判断負荷を最小化
+def extract_amount_from_text(text: str):
+    """OCRで読み取ったテキストから『合計』金額だけを探す簡易ロジック。
 
-* **認知負荷の軽減**
-  ボタンや文字情報を最小限に整理し、直感的に操作できるUI設計
+    品目ごとの自動分類はレシートのレイアウト次第で誤読が多いため行わない。
+    『合計』という文字を含む行が見つかった場合のみ、その行の数字を返す。
+    見つからなければ 0 を返し、ユーザーが必ず目で見て手入力する前提にする
+    （不確かな推測値を初期値として出すと、逆にミスを誘発するため）。
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
 
-* **意味ベースのデータ構造**
-  「食費」「日用品」などを補助説明付きで表現し、判断の曖昧さを減らす
+    for line in lines:
+        if "合計" in line and "預" not in line and "釣" not in line:
+            nums = re.findall(r"[\d,]{2,}", line)
+            cleaned = [int(n.replace(",", "")) for n in nums if n.replace(",", "").isdigit()]
+            if cleaned:
+                return cleaned[0]
 
-* **修正可能なAI支援フロー**
-  OCR結果や分類結果をそのまま確定せず、ユーザーが最終判断できる構造
+    return 0  # 見つからない場合は0。ユーザーに生テキストを見ながら入力してもらう。
 
----
 
-## 📌 実装状況
+# --- 3. 【実際のOCR ＋ 合計金額の自動抽出】 ---
+def analyze_receipt_image(uploaded_file) -> dict:
+    image = Image.open(uploaded_file)
 
-| 機能 | 状態 |
-|---|---|
-| レシート画像のアップロード（JPG / PNG / HEIC） | ✅ 実装済み |
-| OCRによる金額・品目の自動抽出 | ✅ 実装済み |
-| ステップ式の確認・修正UI | ✅ 実装済み |
-| CSV出力 | ✅ 実装済み |
-| freee等の会計API連携 | 🔲 将来構想 |
-| スマホアプリ化 | 🔲 将来構想 |
+    base_width = 800
+    w_percent = base_width / float(image.size[0])
+    h_size = int(float(image.size[1]) * w_percent)
+    image_resized = image.resize((base_width, h_size), Image.Resampling.LANCZOS)
 
-現在のOCR・分類ロジックは正規表現とキーワードマッチによる簡易版です。レシートのレイアウトによって精度が変わるため、ステップ3で必ず人間が確認・修正できる設計にしています（「修正可能なAI支援フロー」の思想はここに反映されています）。
+    extracted_text = pytesseract.image_to_string(image_resized, lang="jpn+eng")
 
----
+    total_amount = extract_amount_from_text(extracted_text)
 
-## 🚀 セットアップ方法
+    cleaned_data = {
+        "date": "",  # OCRでの日付抽出は誤読が多いため、ユーザーに確認してもらう
+        "total_amount": total_amount,
+        "shop_info": "",
+        "memo": "",
+        "debit_account": "食費（毎日のごはん・おやつ）",
+        "raw_text": extracted_text,  # 確認用に生テキストも保持
+    }
+    return cleaned_data
 
-```bash
-# 1. リポジトリをクローン
-git clone https://github.com/MYERS734/Barrier-Free-Brain.git
-cd Barrier-Free-Brain
 
-# 2. 必要なパッケージをインストール
-pip install -r requirements.txt
+def parsed_data_to_csv_row(data: dict) -> list:
+    """確定したデータをCSVの1行分に変換する。"""
+    return [[
+        data.get("date", ""),
+        data.get("shop_info", ""),
+        data.get("memo", ""),
+        data.get("total_amount", 0),
+        data.get("debit_account", ""),
+    ]]
 
-# 3. Tesseract OCR本体をインストール（OS別）
-# Mac:     brew install tesseract tesseract-lang
-# Windows: https://github.com/UB-Mannheim/tesseract/wiki からインストーラーを取得
-# Linux:   sudo apt install tesseract-ocr tesseract-ocr-jpn
 
-# 4. アプリを起動
-streamlit run app.py
-```
+def build_csv_bytes(history: list) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["日付", "店名", "メモ", "金額", "勘定科目（カテゴリ）"])
+    for entry in history:
+        for row in parsed_data_to_csv_row(entry):
+            writer.writerow(row)
+    # ExcelでもGoogleスプレッドシートでも文字化けしないようUTF-8 BOM付きにする
+    return ("\ufeff" + output.getvalue()).encode("utf-8")
 
-ブラウザで `http://localhost:8501` が開き、レシート画像をアップロードして試せます。
 
----
+# --- 4. 画面の構築（ステップ式UI） ---
 
-## 🛠 技術スタック
+# 【ステップ1: 画像読み込み（アップロード対応）】
+if st.session_state.step == "ocr_input":
+    st.subheader("ステップ 1: レシートの読み込み")
+    st.write("レシートの写真を選んでください（JPG・PNG・HEIC対応）。")
 
-* **フロントエンド**
+    uploaded_file = st.file_uploader(
+        "レシート画像を選択",
+        type=["jpg", "jpeg", "png", "heic", "heif"],
+    )
 
-  * Python（Streamlit）
-  * ステップ型UIによるシンプルな操作設計
+    if uploaded_file is not None:
+        st.image(uploaded_file, caption="読み込んだ画像", use_container_width=True)
 
-* **画像・OCR処理**
+        if st.button("📸 この画像を解析する"):
+            with st.spinner("🧠 写真から文字を読み取っています..."):
+                try:
+                    st.session_state.parsed_data = analyze_receipt_image(uploaded_file)
+                    st.session_state.step = "verify_amount"
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 解析中にエラーが発生しました: {e}")
+    else:
+        st.info("👆 まずは画像を選んでください。")
 
-  * Pillow / pillow-heif（HEIC対応）
-  * pytesseract（Tesseract OCR）
+    if st.session_state.history:
+        st.write("---")
+        st.write(f"📚 これまでに記録した件数：{len(st.session_state.history)} 件")
+        csv_bytes = build_csv_bytes(st.session_state.history)
+        st.download_button(
+            "⬇️ 今までの記録をCSVでダウンロード",
+            data=csv_bytes,
+            file_name="barrier_free_brain_kakeibo.csv",
+            mime="text/csv",
+        )
 
-* **データ処理**
+# 【ステップ2: 金額の確認（1画面1タスク）】
+elif st.session_state.step == "verify_amount":
+    st.subheader("ステップ 2: 金額の確認")
 
-  * Python
-  * JSONベースの内部データ構造
-  * 複式簿記（借方・貸方）に基づく仕訳設計
+    if st.session_state.parsed_data["total_amount"] == 0:
+        st.warning("⚠️ 自動では金額を見つけられませんでした。下の生テキストを見ながら、合計金額を入力してください。")
+    else:
+        st.write("写真から自動で読み取った金額です。レシートと見比べて、違っていたら直してください。")
 
-* **外部連携（将来構想）**
+    with st.expander("🔍 OCRが読み取った生のテキストを見る（参考）", expanded=(st.session_state.parsed_data["total_amount"] == 0)):
+        st.text(st.session_state.parsed_data.get("raw_text", ""))
 
-  * freee等の会計API連携を想定した拡張構造
+    amount = st.number_input(
+        "今回のお買い物の合計金額（円）",
+        value=st.session_state.parsed_data["total_amount"],
+        step=1,
+        min_value=0,
+    )
+    st.session_state.parsed_data["total_amount"] = amount
 
----
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("⬅️ 最初に戻る"):
+            st.session_state.step = "ocr_input"
+            st.rerun()
+    with col2:
+        if st.button("次へ進む ➡️"):
+            st.session_state.step = "verify_details"
+            st.rerun()
 
-## 💡 システム構成（処理フロー）
+# 【ステップ3: その他の情報とカテゴリの最終確認】
+elif st.session_state.step == "verify_details":
+    st.subheader("ステップ 3: お店とカテゴリの確認")
+    st.info("🧠 焦らず、あなたのペースで選んでくださいね。")
 
-```
-レシート画像
-↓
-OCR（Tesseract）
-↓
-テキスト整形・分類補助処理
-↓
-JSONデータ生成（取引情報）
-↓
-複式簿記データ変換
-↓
-ユーザー確認UI（修正可能）
-↓
-CSV出力・会計システム連携（将来拡張）
-```
+    date = st.text_input(
+        "日付（例: 2026-06-21）",
+        value=st.session_state.parsed_data.get("date", ""),
+    )
+    shop = st.text_input(
+        "お店の名前",
+        value=st.session_state.parsed_data.get("shop_info", ""),
+    )
+    memo = st.text_input(
+        "メモ（買ったものなど。省略できます）",
+        value=st.session_state.parsed_data.get("memo", ""),
+    )
 
----
+    st.write("---")
+    st.write(f"💰 **合計金額：{st.session_state.parsed_data['total_amount']}円**")
 
-## 💼 簿記知識の応用
+    default_index = ACCOUNT_OPTIONS.index(st.session_state.parsed_data["debit_account"]) \
+        if st.session_state.parsed_data["debit_account"] in ACCOUNT_OPTIONS else 0
+    selected_account = st.selectbox(
+        "🛠️ この支払いはどのグループですか？",
+        options=ACCOUNT_OPTIONS,
+        index=default_index,
+    )
 
-本システムでは、日商簿記2級レベルの知識を活用し、内部データ構造を複式簿記ベースで設計しています。
+    st.session_state.parsed_data["date"] = date
+    st.session_state.parsed_data["shop_info"] = shop
+    st.session_state.parsed_data["memo"] = memo
+    st.session_state.parsed_data["debit_account"] = selected_account
 
-単純なカテゴリ分類ではなく、
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("⬅️ 金額の確認に戻る"):
+            st.session_state.step = "verify_amount"
+            st.rerun()
+    with col2:
+        if st.button("✅ これで家計簿に記録する！"):
+            st.session_state.history.append(st.session_state.parsed_data)
+            st.session_state.step = "success"
+            st.rerun()
 
-* 取引日
-* 金額
-* 勘定科目
-* 借方・貸方構造
+# 【ステップ4: 完了画面】
+elif st.session_state.step == "success":
+    st.balloons()
+    st.success("🎉 あなたの家計簿に記録されました！お疲れ様でした！")
 
-を保持することで、将来的な会計システム連携にも耐えられる設計としています。
+    st.write("### 🗂️ 内部で作成されたデータ構造")
+    st.json(st.session_state.history[-1])
 
----
+    csv_bytes = build_csv_bytes(st.session_state.history)
+    st.download_button(
+        "⬇️ 全件をCSVでダウンロード",
+        data=csv_bytes,
+        file_name="barrier_free_brain_kakeibo.csv",
+        mime="text/csv",
+    )
 
-## 💡 開発の背景
-
-就労移行支援での訓練の中で、入力作業やデータ処理においてミスが発生しやすいという課題を経験しました。
-
-その経験から、「個人の能力の問題ではなく、ツール設計の問題ではないか」と考えるようになりました。
-
-そこで、「人間の特性に適応したツールを自ら設計する」という発想から本プロジェクトを開始しました。
-
----
-
-## 🚀 目指しているもの
-
-このプロジェクトは単なる家計簿アプリではなく、
-
-* 認知負荷を下げる設計思想
-* ミスを前提とした修正可能なシステム設計
-* 会計知識とソフトウェア設計の統合
-
-を通じて、「人間に優しい情報処理システム」の実現を目指しています。
-
----
-
-## 📌 補足
-
-本プロジェクトは個人開発のプロトタイプであり、実務レベルの改善や機能追加を継続的に行うことを前提としています。
+    if st.button("🔄 別のレシートを登録する"):
+        st.session_state.step = "ocr_input"
+        st.session_state.parsed_data = None
+        st.rerun()
