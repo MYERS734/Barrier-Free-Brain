@@ -120,7 +120,7 @@ if st.session_state.step == "ocr_input":
     )
 
     if uploaded_file is not None:
-        st.image(uploaded_file, caption="読み込んだ画像", use_container_width=True)
+        st.image(uploaded_file, caption="読み込んだ画像", width="stretch")
 
         if st.button("📸 この画像を解析する"):
             with st.spinner("🧠 写真から文字を読み取っています..."):
